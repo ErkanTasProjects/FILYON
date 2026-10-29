@@ -1,0 +1,33 @@
+{
+  "name": "filyon-monorepo",
+  "version": "1.0.0",
+  "description": "FILYON: Kapsamlı Filo & Makine İkmal Yönetim Bilgi Sistemi",
+  "private": true,
+  "workspaces": [
+    "backend",
+    "frontend",
+    "mobile"
+  ],
+  "scripts": {
+    "dev:backend": "npm run start:dev --workspace=backend",
+    "dev:frontend": "npm run dev --workspace=frontend",
+    "dev:mobile": "npm run start --workspace=mobile",
+    "build:all": "npm run build --workspaces --if-present",
+    "db:migrate": "npm run prisma:migrate --workspace=backend",
+    "db:seed": "npm run prisma:seed --workspace=backend",
+    "docker:up": "docker-compose up -d --build",
+    "docker:down": "docker-compose down"
+  },
+  "keywords": [
+    "filyon",
+    "fleet-management",
+    "machine-supply",
+    "sayistay-audit",
+    "nestjs",
+    "react",
+    "react-native",
+    "prisma"
+  ],
+  "author": "FILYON Core Team",
+  "license": "UNLICENSED"
+}

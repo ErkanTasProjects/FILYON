@@ -1,0 +1,445 @@
+// =============================================================================
+// FILYON: Kapsamlı Filo & Makine İkmal Yönetim Bilgi Sistemi
+// Prisma Schema Definition
+// Multi-Tenant, Type-Safe, Enterprise Fleet & Machinery Maintenance Architecture
+// =============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// -----------------------------------------------------------------------------
+// ENUMS
+// -----------------------------------------------------------------------------
+
+enum UserRole {
+  ADMIN         // Sistem Yöneticisi / Üst Düzey Yetkili
+  MANAGER       // Filo / Makine İkmal Müdürü
+  CHIEF         // Atölye / Bakım Onarım Şefi
+  MECHANIC      // Usta / Teknisyen
+  STOREKEEPER   // Ambar Sorumlusu / Yedek Parça Yetkilisi
+  DRIVER        // Sürücü / Operatör
+}
+
+enum MeterType {
+  KM            // Kilometre (Binek & Ticari Araçlar)
+  WORKING_HOUR  // Çalışma Saati (İş Makineleri, Jeneratörler, Vinçler)
+}
+
+enum VehicleStatus {
+  AVAILABLE            // Göreve Uygun & Boşta
+  ASSIGNED             // Zimmetli (Görevde)
+  UNDER_MAINTENANCE    // Serviste / Atölyede
+  OUT_OF_SERVICE       // Göreve Uygun Değil / Hurda / Gayrifaal
+  INSPECTION_EXPIRED   // Muayene Süresi Geçti (Muayene Kilidi Devrede)
+}
+
+enum ZimmetStatus {
+  ACTIVE    // Araç Aktif Olarak Sürücüde
+  RETURNED  // Araç Sorunsuz İade Edildi
+  REJECTED  // Teslimat veya İade Reddedildi
+}
+
+enum IssuePriority {
+  LOW       // Düşük Öncelik
+  MEDIUM    // Normal Öncelik
+  HIGH      // Yüksek Öncelik
+  CRITICAL  // Kritik / Araç Derhal Stop Edilmeli
+}
+
+enum IssueStatus {
+  REPORTED             // Şoför Tarafından Bildirildi
+  UNDER_REVIEW         // Atölye Şefi İncelemesinde
+  WORK_ORDER_CREATED   // İş Emrine Dönüştürüldü
+  RESOLVED             // Onarım Tamamlandı
+  CANCELLED            // İptal / Mükerrer Kayıt
+}
+
+enum WorkOrderStatus {
+  DRAFT                         // Taslak
+  ASSIGNED                      // Ustaya Atandı
+  IN_PROGRESS                   // Onarım / Bakım Devam Ediyor
+  WAITING_PARTS                 // Ambar Parça Bekleniyor
+  WAITING_SCRAP_CONFIRMATION    // Hurda Kilidi Devrede (Sayıştay Fotoğraf & Ambar Onayı Bekliyor)
+  COMPLETED                     // Kapatıldı & Tamamlandı
+  CANCELLED                     // İptal Edildi
+}
+
+enum PartTransactionType {
+  STOCK_IN                // Satın Alma Girişi
+  STOCK_OUT_WORK_ORDER    // İş Emrine Parça Çıkışı
+  SCRAP_RETURN            // Hurda Parçanın Ambara Fiziksel İadesi
+  ADJUSTMENT              // Sayım Farkı Düzeltmesi
+}
+
+enum ScrapStatus {
+  PENDING_WAREHOUSE_APPROVAL  // Fotoğraf Yüklendi, Ambar Onayı Bekleniyor
+  APPROVED                    // Ambar Tarafından Onaylandı (İş Emri Kapatılabilir)
+  REJECTED                    // Hurda Kabul Edilmedi (Fotoğraf Yetersiz / Parça Uyuşmuyor)
+}
+
+// -----------------------------------------------------------------------------
+// CORE MODELS
+// -----------------------------------------------------------------------------
+
+/// Çok Kiracılı Sistem (Multi-Tenant)
+model Tenant {
+  id               String   @id @default(uuid())
+  code             String   @unique // Örn: 'ANKARA-BEL-01', 'FILO-TURK'
+  name             String   // Kurum veya Şirket Adı
+  taxNumber        String?  // Vergi No
+  contactPhone     String?
+  contactEmail     String?
+  address          String?
+  logoUrl          String?
+  isActive         Boolean  @default(true)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  // Tenant İlişkileri
+  users            User[]
+  vehicles         Vehicle[]
+  zimmets          Zimmet[]
+  issueReports     IssueReport[]
+  workOrders       WorkOrder[]
+  spareParts       SparePart[]
+  partTransactions PartTransaction[]
+  scrapRecords     ScrapRecord[]
+  notifications    Notification[]
+  auditLogs        AuditLog[]
+
+  @@map("tenants")
+}
+
+/// Kullanıcı Tablosu (RBAC: Admin, Manager, Chief, Mechanic, Storekeeper, Driver)
+model User {
+  id               String       @id @default(uuid())
+  tenantId         String
+  email            String
+  passwordHash     String
+  firstName        String
+  lastName         String
+  nationalId       String?      // T.C. Kimlik No
+  phone            String?
+  role             UserRole     @default(DRIVER)
+  avatarUrl        String?
+  isActive         Boolean      @default(true)
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+
+  // İlişkiler
+  tenant           Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  assignedZimmets  Zimmet[]     @relation("DriverZimmets")
+  createdZimmets   Zimmet[]     @relation("AdminZimmets")
+  driverIssues     IssueReport[] @relation("DriverIssues")
+  chiefOrders      WorkOrder[]  @relation("ChiefWorkOrders")
+  mechanicOrders   WorkOrder[]  @relation("MechanicWorkOrders")
+  scrapApprovals   ScrapRecord[] @relation("WarehouseScrapStaff")
+  partTransactions PartTransaction[]
+  notifications    Notification[]
+  auditLogs        AuditLog[]
+
+  @@unique([tenantId, email])
+  @@index([tenantId, role])
+  @@map("users")
+}
+
+/// Araç & İş Makinesi Kayıtları
+model Vehicle {
+  id                   String        @id @default(uuid())
+  tenantId             String
+  plateNumber          String        // Plaka veya Makine Kodu (Örn: 06 FLN 2026, EX-402)
+  brand                String        // Mercedes, Caterpillar, Ford, Scania
+  model                String        // Actros, 320D, Transit, R500
+  year                 Int
+  category             String        // Çekici, Damperli Kamyon, Ekskavatör, Otobüs, Binek vb.
+  meterType            MeterType     @default(KM)
+  currentMeter         Float         @default(0) // KM veya Çalışma Saati
+  chassisNumber        String?       // Şasi No
+  engineNumber         String?       // Motor No
+  qrCodeToken          String        @unique @default(uuid()) // Kabin QR Kodu için benzersiz token
+  status               VehicleStatus @default(AVAILABLE)
+
+  // Yasal Süreler & Muayene Bilgileri (Muayene Kilidi için temel parametreler)
+  lastInspectionDate   DateTime?
+  nextInspectionDate   DateTime?     // Zorunlu Muayene Bitiş Tarihi
+  insuranceExpiryDate  DateTime?     // Trafik Sigortası Bitiş
+  kaskoExpiryDate      DateTime?     // Kasko Bitiş
+  lastMaintenanceDate  DateTime?     // Son Periyodik Bakım
+  nextMaintenanceMeter Float?        // Sıradaki Bakım KM/Saati
+
+  fuelType             String?       // Dizel, Benzin, Elektrik, Hibrit
+  fuelCapacity         Float?        // Depo Litre
+  assignedDepartment   String?       // Fen İşleri, Temizlik İşleri, Lojistik
+  notes                String?
+  createdAt            DateTime      @default(now())
+  updatedAt            DateTime      @updatedAt
+
+  // İlişkiler
+  tenant               Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  zimmets              Zimmet[]
+  issueReports         IssueReport[]
+  workOrders           WorkOrder[]
+
+  @@unique([tenantId, plateNumber])
+  @@index([tenantId, status])
+  @@index([nextInspectionDate])
+  @@map("vehicles")
+}
+
+/// Sürücüye Araç Teslimi & Zimmet (QR Kod Doğrulamalı)
+model Zimmet {
+  id                 String       @id @default(uuid())
+  tenantId           String
+  vehicleId          String
+  driverId           String
+  assignedByUserId   String
+  assignedAt         DateTime     @default(now())
+  returnedAt         DateTime?
+  startingMeter      Float        // Teslim Alırkenki KM/Saat
+  returnMeter        Float?       // Teslim Ederkenki KM/Saat
+  qrScanVerified     Boolean      @default(true) // Araç kabinindeki QR okutuldu mu?
+  status             ZimmetStatus @default(ACTIVE)
+  driverSignatureUrl String?
+  checkoutNotes      String?
+  returnNotes        String?
+  returnStatusCheck  String?      // Hasar/Eksik yok, Temiz vb.
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
+
+  // İlişkiler
+  tenant             Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  vehicle            Vehicle      @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+  driver             User         @relation("DriverZimmets", fields: [driverId], references: [id], onDelete: Cascade)
+  assignedByUser     User         @relation("AdminZimmets", fields: [assignedByUserId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, status])
+  @@index([vehicleId, driverId])
+  @@map("zimmets")
+}
+
+/// Şoför / Operatör Arıza Bildirimi
+model IssueReport {
+  id                 String        @id @default(uuid())
+  tenantId           String
+  vehicleId          String
+  driverId           String
+  title              String
+  description        String
+  priority           IssuePriority @default(MEDIUM)
+  status             IssueStatus   @default(REPORTED)
+  
+  // Medya Ekleri (Fotoğraf ve Ses Zorunluluğu)
+  photoUrls          String[]      @default([]) // Çoklu fotoğraf URL dizisi
+  audioRecordingUrl  String?       // Sesli arıza anlatımı URL'si
+  voiceTranscript    String?       // Opsiyonel ses transkripsiyonu
+  
+  // Konum & Saha Bilgisi
+  latitude           Float?
+  longitude          Float?
+  offlineId          String?       // Mobil çevrimdışı senkronizasyon benzersiz ID'si
+  syncedAt           DateTime?     // Sunucuya aktarılma zamanı
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+
+  // İlişkiler
+  tenant             Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  vehicle            Vehicle       @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+  driver             User          @relation("DriverIssues", fields: [driverId], references: [id], onDelete: Cascade)
+  workOrders         WorkOrder[]
+
+  @@index([tenantId, status])
+  @@index([vehicleId])
+  @@map("issue_reports")
+}
+
+/// Atölye İş Emri (Sayıştay Hurda Kilidi & Parça / İşçilik Maliyetleri)
+model WorkOrder {
+  id                  String          @id @default(uuid())
+  tenantId            String
+  workOrderNumber     String          @unique // Örn: WO-2026-00412
+  vehicleId           String
+  chiefId             String          // Açan Atölye Şefi
+  assignedMechanicId  String?         // Görevlendirilen Baş Usta / Mekanikçi
+  issueReportId       String?         // Varsa tetikleyen arıza kaydı
+  title               String
+  description         String
+  priority            IssuePriority   @default(MEDIUM)
+  status              WorkOrderStatus @default(DRAFT)
+  
+  startedAt           DateTime?
+  completedAt         DateTime?
+  
+  // Maliyet Dağılımı (Sayıştay ve Denetim Raporu İçin)
+  laborHours          Float           @default(0)
+  laborHourlyRate     Float           @default(0)
+  laborCost           Float           @default(0)
+  partsCost           Float           @default(0)
+  externalServiceCost Float           @default(0) // Torna, enjektör gibi dış hizmetler
+  totalCost           Float           @default(0)
+  
+  diagnosisNotes      String?
+  completionNotes     String?
+  createdAt           DateTime        @default(now())
+  updatedAt           DateTime        @updatedAt
+
+  // İlişkiler
+  tenant              Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  vehicle             Vehicle         @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+  chief               User            @relation("ChiefWorkOrders", fields: [chiefId], references: [id], onDelete: Cascade)
+  assignedMechanic    User?           @relation("MechanicWorkOrders", fields: [assignedMechanicId], references: [id])
+  issueReport         IssueReport?    @relation(fields: [issueReportId], references: [id])
+  
+  usedParts           WorkOrderPart[]
+  scrapRecords        ScrapRecord[]   // Hurda Kilidi Kanıtları
+  partTransactions    PartTransaction[]
+
+  @@index([tenantId, status])
+  @@index([vehicleId])
+  @@map("work_orders")
+}
+
+/// Ambar & Yedek Parça Kartı
+model SparePart {
+  id                  String            @id @default(uuid())
+  tenantId            String
+  partCode            String            // Kurum İçi Stok Kodu (Örn: FLN-FLT-091)
+  oemCode             String?           // Üretici Orijinal Kodu (Örn: A 000 420 22 20)
+  name                String            // Parça Adı (Örn: Ön Fren Balata Takımı)
+  category            String            // Filtre, Fren, Motor, Şanzıman, Hidrolik vb.
+  unit                String            @default("ADET") // ADET, LİTRE, TAKIM, METRE
+  unitPrice           Float             @default(0)
+  stockQuantity       Float             @default(0)
+  minStockLevel       Float             @default(5)      // Kritik Stok Eşiği
+  shelfLocation       String?           // Raf/Göz Konumu (Örn: A-04-RAF-2)
+  barcode             String?           // Barkod / QR
+  compatibleVehicles  String?           // Uyumlu Marka / Modeller
+  createdAt           DateTime          @default(now())
+  updatedAt           DateTime          @updatedAt
+
+  // İlişkiler
+  tenant              Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  workOrderParts      WorkOrderPart[]
+  scrapRecords        ScrapRecord[]
+  partTransactions    PartTransaction[]
+
+  @@unique([tenantId, partCode])
+  @@index([tenantId, barcode])
+  @@map("spare_parts")
+}
+
+/// İş Emrinde Kullanılan Yedek Parçalar
+model WorkOrderPart {
+  id           String    @id @default(uuid())
+  tenantId     String
+  workOrderId  String
+  sparePartId  String
+  quantity     Float     @default(1)
+  unitPrice    Float     @default(0)
+  totalPrice   Float     @default(0)
+  createdAt    DateTime  @default(now())
+
+  // İlişkiler
+  workOrder    WorkOrder @relation(fields: [workOrderId], references: [id], onDelete: Cascade)
+  sparePart    SparePart @relation(fields: [sparePartId], references: [id], onDelete: Cascade)
+
+  @@index([workOrderId, sparePartId])
+  @@map("work_order_parts")
+}
+
+/// Sayıştay & İç Denetim Uyumu: Hurda Parça Kilidi (Scrap Part Lock)
+/// Usta yeni parça taktığında, sökülen eski hurda parçanın fotoğrafı yüklenmeden ve
+/// ambar yetkilisi teslim alıp onaylamadan iş emri kapatılamaz!
+model ScrapRecord {
+  id                 String      @id @default(uuid())
+  tenantId           String
+  workOrderId        String
+  sparePartId        String
+  scrapPhotoUrl      String      // Sökülen hurda parçanın net fotoğrafı (Sayıştay delili)
+  scrapQuantity      Float       @default(1)
+  warehouseStaffId   String?     // Teslim alan Ambar Yetkilisi
+  status             ScrapStatus @default(PENDING_WAREHOUSE_APPROVAL)
+  approvedAt         DateTime?
+  rejectionReason    String?
+  warehouseNotes     String?
+  createdAt          DateTime    @default(now())
+  updatedAt          DateTime    @updatedAt
+
+  // İlişkiler
+  tenant             Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  workOrder          WorkOrder   @relation(fields: [workOrderId], references: [id], onDelete: Cascade)
+  sparePart          SparePart   @relation(fields: [sparePartId], references: [id], onDelete: Cascade)
+  warehouseStaff     User?       @relation("WarehouseScrapStaff", fields: [warehouseStaffId], references: [id])
+
+  @@index([workOrderId, status])
+  @@map("scrap_records")
+}
+
+/// Ambar Stok Hareketleri
+model PartTransaction {
+  id                 String              @id @default(uuid())
+  tenantId           String
+  sparePartId        String
+  workOrderId        String?
+  type               PartTransactionType
+  quantity           Float
+  previousStock      Float
+  newStock           Float
+  performedByUserId  String
+  referenceDocNo     String?             // İrsaliye No, Fiş No veya İş Emri No
+  notes              String?
+  createdAt          DateTime            @default(now())
+
+  // İlişkiler
+  tenant             Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  sparePart          SparePart           @relation(fields: [sparePartId], references: [id], onDelete: Cascade)
+  workOrder          WorkOrder?          @relation(fields: [workOrderId], references: [id])
+  performedByUser    User                @relation(fields: [performedByUserId], references: [id])
+
+  @@index([tenantId, sparePartId])
+  @@map("part_transactions")
+}
+
+/// Sistem Bildirimleri (Muayene Hatırlatıcısı, Kritik Stok, İş Emri Ataması)
+model Notification {
+  id        String   @id @default(uuid())
+  tenantId  String
+  userId    String
+  title     String
+  message   String
+  type      String   // INSPECTION_ALERT, SCRAP_APPROVAL, STOCK_CRITICAL, WORK_ORDER
+  isRead    Boolean  @default(false)
+  linkUrl   String?
+  createdAt DateTime @default(now())
+
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, userId, isRead])
+  @@map("notifications")
+}
+
+/// Sayıştay & İç Denetim Sistem Logları (Audit Log)
+model AuditLog {
+  id         String   @id @default(uuid())
+  tenantId   String
+  userId     String?
+  action     String   // VEHICLE_CREATED, INSPECTION_LOCKED, WORK_ORDER_CLOSED, SCRAP_APPROVED vb.
+  entity     String   // Vehicle, WorkOrder, ScrapRecord, Zimmet
+  entityId   String
+  payload    String?  // JSON string
+  ipAddress  String?
+  userAgent  String?
+  createdAt  DateTime @default(now())
+
+  tenant     Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user       User?    @relation(fields: [userId], references: [id])
+
+  @@index([tenantId, entity, action])
+  @@map("audit_logs")
+}

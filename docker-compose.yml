@@ -1,0 +1,78 @@
+version: '3.8'
+
+services:
+  # ==========================================
+  # PostgreSQL Database with Health Check
+  # ==========================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: filyon_postgres
+    restart: always
+    environment:
+      POSTGRES_USER: filyon_admin
+      POSTGRES_PASSWORD: filyon_secure_pass_2026
+      POSTGRES_DB: filyon_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - filyon_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U filyon_admin -d filyon_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - filyon_network
+
+  # ==========================================
+  # FILYON NestJS API Backend
+  # ==========================================
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: filyon_backend
+    restart: always
+    environment:
+      NODE_ENV: production
+      PORT: 4000
+      API_PREFIX: api/v1
+      DATABASE_URL: postgresql://filyon_admin:filyon_secure_pass_2026@postgres:5432/filyon_db?schema=public
+      JWT_SECRET: filyon_super_secret_jwt_key_2026_enterprise_fleet_management
+      JWT_EXPIRATION: 7d
+    ports:
+      - "4000:4000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - filyon_uploads:/app/uploads
+    networks:
+      - filyon_network
+
+  # ==========================================
+  # FILYON React Web Management Panel
+  # ==========================================
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: filyon_frontend
+    restart: always
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    networks:
+      - filyon_network
+
+volumes:
+  filyon_pgdata:
+    name: filyon_pgdata
+  filyon_uploads:
+    name: filyon_uploads
+
+networks:
+  filyon_network:
+    name: filyon_network
+    driver: bridge
